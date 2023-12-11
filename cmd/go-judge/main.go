@@ -559,9 +559,18 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get memory info"})
 			return
 		}
+		var sum float64 = 0
+
+		for _, usage := range cpuUsage {
+			sum += usage
+		}
+
+		averageCPU := sum / float64(len(cpuUsage))
+		// Round the averageCPU to 6 decimal places
+		averageCPU = float64(int(averageCPU*1e6)) / 1e6
 
 		c.JSON(http.StatusOK, gin.H{
-			"cpu":    cpuUsage,
+			"cpu":    averageCPU,
 			"memory": memoryInfo.UsedPercent,
 		})
 	}
