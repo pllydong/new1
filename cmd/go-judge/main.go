@@ -9,6 +9,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/mem"
 	"log"
 	math_rand "math/rand"
 	"net/http"
@@ -321,6 +323,8 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 	// Config handle
 	r.GET("/config", generateHandleConfig(conf, builderParam))
 
+	r.GET("/config", generateHandleCheckInfo(conf, builderParam))
+
 	// Add auth token
 	if conf.AuthToken != "" {
 		r.Use(tokenAuth(conf.AuthToken))
@@ -538,6 +542,27 @@ func generateHandleConfig(conf *config.Config, builderParam map[string]any) func
 			"addressSpaceLimit": true,
 			"fileStorePath":     conf.Dir,
 			"runnerConfig":      builderParam,
+		})
+	}
+}
+
+func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) func(*gin.Context) {
+	return func(c *gin.Context) {
+		cpuUsage, err := cpu.Percent(0, true) // 获取所有CPU核心的使用率
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get CPU usage"})
+			return
+		}
+
+		memoryInfo, err := mem.VirtualMemory()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get memory info"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"cpu":    cpuUsage,
+			"memory": memoryInfo.UsedPercent,
 		})
 	}
 }
