@@ -323,7 +323,7 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 	// Config handle
 	r.GET("/config", generateHandleConfig(conf, builderParam))
 
-	r.GET("/config", generateHandleCheckInfo(conf, builderParam))
+	r.GET("/checkInfo", generateHandleCheckInfo(conf, builderParam))
 
 	// Add auth token
 	if conf.AuthToken != "" {
