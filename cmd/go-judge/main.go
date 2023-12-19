@@ -10,7 +10,9 @@ import (
 	"flag"
 	"fmt"
 	"github.com/shirou/gopsutil/cpu"
+	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
+	"github.com/shirou/gopsutil/net"
 	"log"
 	math_rand "math/rand"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/criyle/go-judge/cmd/go-judge/config"
@@ -546,22 +549,160 @@ func generateHandleConfig(conf *config.Config, builderParam map[string]any) func
 	}
 }
 
+// 辅助函数，计算网络带宽
+func calculateNetworkBandwidth() (float64, float64, error) {
+	// 获取初始网络 I/O 统计信息
+	ioStatsStart, err := net.IOCounters(true)
+	if err != nil {
+		return 0, 0, err
+	}
+	startBytesSent, startBytesRecv := sumIOCounters(ioStatsStart)
+	startTime := time.Now()
+
+	// 等待一段时间
+	time.Sleep(1 * time.Second)
+
+	// 获取新的网络 I/O 统计信息
+	ioStatsEnd, err := net.IOCounters(true)
+	if err != nil {
+		return 0, 0, err
+	}
+	endBytesSent, endBytesRecv := sumIOCounters(ioStatsEnd)
+	endTime := time.Now()
+
+	// 计算时间间隔，以秒为单位
+	interval := endTime.Sub(startTime).Seconds()
+
+	// 计算带宽
+	mbpsSent := (float64(endBytesSent-startBytesSent) * 8) / (interval * 1024 * 1024)
+	mbpsRecv := (float64(endBytesRecv-startBytesRecv) * 8) / (interval * 1024 * 1024)
+
+	return mbpsSent, mbpsRecv, nil
+}
+
+// 用于汇总网络 I/O 的辅助函数
+func sumIOCounters(ioStats []net.IOCountersStat) (bytesSent, bytesRecv uint64) {
+	for _, stat := range ioStats {
+		bytesSent += stat.BytesSent
+		bytesRecv += stat.BytesRecv
+	}
+	return
+}
+
+// 辅助函数，计算磁盘 I/O
+func calculateDiskIO() (float64, float64, error) {
+	// 获取初始磁盘 I/O 统计信息
+	ioStatsStart, err := disk.IOCounters()
+	if err != nil {
+		return 0, 0, err
+	}
+	startReadBytes, startWriteBytes := sumDiskIO(ioStatsStart)
+	startTime := time.Now()
+
+	// 等待一段时间
+	time.Sleep(1 * time.Second)
+
+	// 获取新的磁盘 I/O 统计信息
+	ioStatsEnd, err := disk.IOCounters()
+	if err != nil {
+		return 0, 0, err
+	}
+	endReadBytes, endWriteBytes := sumDiskIO(ioStatsEnd)
+	endTime := time.Now()
+
+	// 计算时间间隔，以秒为单位
+	interval := endTime.Sub(startTime).Seconds()
+
+	// 计算读写速率并转换为 KB/s
+	readRate := (float64(endReadBytes-startReadBytes) / 1024) / interval
+	writeRate := (float64(endWriteBytes-startWriteBytes) / 1024) / interval
+
+	return readRate, writeRate, nil
+}
+
+// 用于汇总磁盘 I/O 的辅助函数
+func sumDiskIO(ioStats map[string]disk.IOCountersStat) (readBytes, writeBytes uint64) {
+	for _, stat := range ioStats {
+		readBytes += stat.ReadBytes
+		writeBytes += stat.WriteBytes
+	}
+	return
+}
+
 func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) func(*gin.Context) {
 	return func(c *gin.Context) {
-		cpuUsage, err := cpu.Percent(0, false)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get CPU usage"})
+		var wg sync.WaitGroup
+		var cpuUsage []float64
+		var memoryInfo *mem.VirtualMemoryStat
+		var mbpsSent, mbpsRecv float64
+		var readRate, writeRate float64
+		var err error
+
+		// 并行获取 CPU 使用率
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cpuUsage, err = cpu.Percent(time.Second, true)
+			if err != nil {
+				cpuUsage = nil
+			}
+		}()
+
+		// 并行获取内存信息
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			memoryInfo, err = mem.VirtualMemory()
+			if err != nil {
+				memoryInfo = nil
+			}
+		}()
+
+		// 并行获取网络带宽
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mbpsSent, mbpsRecv, err = calculateNetworkBandwidth()
+			if err != nil {
+				mbpsSent, mbpsRecv = 0, 0
+			}
+		}()
+
+		// 并行获取磁盘 I/O 速率
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			readRate, writeRate, err = calculateDiskIO()
+			if err != nil {
+				readRate, writeRate = 0, 0
+			}
+		}()
+
+		// 等待所有协程完成
+		wg.Wait()
+
+		// 验证获取到的数据
+		if cpuUsage == nil || memoryInfo == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system information"})
 			return
 		}
 
-		memoryInfo, err := mem.VirtualMemory()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get memory info"})
-			return
-		}
+		physicalCnt, _ := cpu.Counts(false)
+		logicalCnt, _ := cpu.Counts(true)
+
+		// 返回所有统计信息
 		c.JSON(http.StatusOK, gin.H{
-			"cpu":    cpuUsage[0],
-			"memory": memoryInfo.UsedPercent,
+			"cpu_total_usage":       cpuUsage[0],                             // CPU 总使用率
+			"cpu_physical_cores":    float64(physicalCnt),                    // 物理核心数
+			"cpu_logical_cores":     float64(logicalCnt),                     // 逻辑核心数
+			"cpu_core_usage":        cpuUsage[1:],                            // 每个核心的使用率
+			"memory_usage_percent":  memoryInfo.UsedPercent,                  // 内存使用百分比
+			"memory_used_mb":        float64(memoryInfo.Used) / 1024 / 1024,  // 已使用内存（MB）
+			"memory_total_mb":       float64(memoryInfo.Total) / 1024 / 1024, // 总内存（MB）
+			"network_upload_mbps":   mbpsSent,                                // 网络上传速率（Mbps）
+			"network_download_mbps": mbpsRecv,                                // 网络下载速率（Mbps）
+			"disk_read_kbps":        readRate,                                // 磁盘读取速率（KB/s）
+			"disk_write_kbps":       writeRate,                               // 磁盘写入速率（KB/s）
 		})
 	}
 }
