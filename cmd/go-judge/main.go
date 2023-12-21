@@ -558,29 +558,40 @@ func sumIOCounters(ioStats []net.IOCountersStat) (bytesSent, bytesRecv uint64) {
 	return
 }
 
-// 新的 calculateNetworkBandwidth 函数
 func calculateNetworkBandwidth() (float64, float64, error) {
-	var totalBytesSent, totalBytesRecv uint64
-	var count int64
+	var lastBytesSent, lastBytesRecv uint64
+	var totalSentDiff, totalRecvDiff uint64
+
+	ioStats, err := net.IOCounters(true)
+	if err != nil {
+		return 0, 0, err
+	}
+	lastBytesSent, lastBytesRecv = sumIOCounters(ioStats)
 
 	for i := 0; i < 10; i++ {
-		ioStats, err := net.IOCounters(true)
+		time.Sleep(1 * time.Second)
+		ioStats, err = net.IOCounters(true)
 		if err != nil {
 			return 0, 0, err
 		}
 		bytesSent, bytesRecv := sumIOCounters(ioStats)
-		totalBytesSent += bytesSent
-		totalBytesRecv += bytesRecv
-		time.Sleep(1 * time.Second)
-		count++
+
+		// 计算每秒的增量
+		sentDiff := bytesSent - lastBytesSent
+		recvDiff := bytesRecv - lastBytesRecv
+
+		totalSentDiff += sentDiff
+		totalRecvDiff += recvDiff
+
+		lastBytesSent = bytesSent
+		lastBytesRecv = bytesRecv
 	}
 
-	avgBytesSent := totalBytesSent / uint64(count)
-	avgBytesRecv := totalBytesRecv / uint64(count)
-	mbpsSent := (float64(avgBytesSent) * 8) / (1024 * 1024)
-	mbpsRecv := (float64(avgBytesRecv) * 8) / (1024 * 1024)
+	// 计算平均带宽 (Mbps)
+	avgMbpsSent := (float64(totalSentDiff) * 8) / (10 * 1024 * 1024)
+	avgMbpsRecv := (float64(totalRecvDiff) * 8) / (10 * 1024 * 1024)
 
-	return mbpsSent, mbpsRecv, nil
+	return avgMbpsSent, avgMbpsRecv, nil
 }
 
 // 用于汇总磁盘 I/O 的辅助函数
@@ -592,59 +603,47 @@ func sumDiskIO(ioStats map[string]disk.IOCountersStat) (readBytes, writeBytes ui
 	return
 }
 
-// 新的 calculateDiskIO 函数
 func calculateDiskIO() (float64, float64, error) {
-	var totalReadBytes, totalWriteBytes uint64
-	var count int64
+	var lastReadBytes, lastWriteBytes uint64
+	var totalReadDiff, totalWriteDiff uint64
+
+	ioStats, err := disk.IOCounters()
+	if err != nil {
+		return 0, 0, err
+	}
+	lastReadBytes, lastWriteBytes = sumDiskIO(ioStats)
 
 	for i := 0; i < 10; i++ {
-		ioStats, err := disk.IOCounters()
+		time.Sleep(1 * time.Second)
+		ioStats, err = disk.IOCounters()
 		if err != nil {
 			return 0, 0, err
 		}
 		readBytes, writeBytes := sumDiskIO(ioStats)
-		totalReadBytes += readBytes
-		totalWriteBytes += writeBytes
-		time.Sleep(1 * time.Second)
-		count++
+
+		// 计算每秒的增量
+		readDiff := readBytes - lastReadBytes
+		writeDiff := writeBytes - lastWriteBytes
+
+		totalReadDiff += readDiff
+		totalWriteDiff += writeDiff
+
+		lastReadBytes = readBytes
+		lastWriteBytes = writeBytes
 	}
 
-	avgReadBytes := totalReadBytes / uint64(count)
-	avgWriteBytes := totalWriteBytes / uint64(count)
-	readRate := (float64(avgReadBytes) / 1024)
-	writeRate := (float64(avgWriteBytes) / 1024)
+	// 计算平均读写速率 (KB/s)
+	avgReadRate := float64(totalReadDiff) / 10 / 1024
+	avgWriteRate := float64(totalWriteDiff) / 10 / 1024
 
-	return readRate, writeRate, nil
-}
-
-// Function to calculate the average of a slice of float64 values
-func average(values []float64) float64 {
-	sum := 0.0
-	for _, value := range values {
-		sum += value
-	}
-	return sum / float64(len(values))
-}
-
-// Helper function to get data in a loop for 10 seconds
-func getDataInLoop(getDataFunc func() ([]float64, error)) ([]float64, error) {
-	var dataPoints []float64
-	for i := 0; i < 10; i++ {
-		data, err := getDataFunc()
-		if err != nil {
-			return nil, err
-		}
-		dataPoints = append(dataPoints, data...)
-		time.Sleep(time.Second)
-	}
-	return dataPoints, nil
+	return avgReadRate, avgWriteRate, nil
 }
 
 func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) func(*gin.Context) {
 	return func(c *gin.Context) {
 		var wg sync.WaitGroup
 		var cpuUsage []float64
-		var cpuPerUsage []float64
+		var cpu_core_usage []float64
 		var memoryInfo *mem.VirtualMemoryStat
 		var mbpsSent, mbpsRecv float64
 		var readRate, writeRate float64
@@ -664,7 +663,7 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cpuPerUsage, err = cpu.Percent(10*time.Second, false)
+			cpu_core_usage, err = cpu.Percent(10*time.Second, false)
 			if err != nil {
 				cpuUsage = nil
 			}
@@ -714,7 +713,7 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 
 		// 返回所有统计信息
 		c.JSON(http.StatusOK, gin.H{
-			"cpu_per_usage":         cpuPerUsage,                             //CPU 每个核得使用率
+			"cpu_core_usage":        cpu_core_usage,                          //CPU 每个核得使用率
 			"cpu_total_usage":       cpuUsage[0],                             // CPU 总使用率
 			"cpu_physical_cores":    float64(physicalCnt),                    // 物理核心数
 			"cpu_logical_cores":     float64(logicalCnt),                     // 逻辑核心数
@@ -724,7 +723,7 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 			"network_upload_mbps":   mbpsSent,                                // 网络上传速率（Mbps）
 			"network_download_mbps": mbpsRecv,                                // 网络下载速率（Mbps）
 			"disk_read_kbps":        readRate,                                // 磁盘读取速率（KB/s）
-			"  ":                    writeRate,                               // 磁盘写入速率（KB/s）
+			"diskWriteKbps":         writeRate,                               // 磁盘写入速率（KB/s）
 		})
 	}
 }
