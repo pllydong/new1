@@ -644,6 +644,7 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 	return func(c *gin.Context) {
 		var wg sync.WaitGroup
 		var cpuUsage []float64
+		var cpuPerUsage []float64
 		var memoryInfo *mem.VirtualMemoryStat
 		var mbpsSent, mbpsRecv float64
 		var readRate, writeRate float64
@@ -654,6 +655,16 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 		go func() {
 			defer wg.Done()
 			cpuUsage, err = cpu.Percent(10*time.Second, true)
+			if err != nil {
+				cpuUsage = nil
+			}
+		}()
+
+		// 并行获取每个核心 CPU 使用率
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cpuPerUsage, err = cpu.Percent(10*time.Second, false)
 			if err != nil {
 				cpuUsage = nil
 			}
@@ -703,6 +714,7 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 
 		// 返回所有统计信息
 		c.JSON(http.StatusOK, gin.H{
+			"cpu_per_usage":         cpuPerUsage,                             //CPU 每个核得使用率
 			"cpu_total_usage":       cpuUsage[0],                             // CPU 总使用率
 			"cpu_physical_cores":    float64(physicalCnt),                    // 物理核心数
 			"cpu_logical_cores":     float64(logicalCnt),                     // 逻辑核心数
@@ -712,7 +724,7 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 			"network_upload_mbps":   mbpsSent,                                // 网络上传速率（Mbps）
 			"network_download_mbps": mbpsRecv,                                // 网络下载速率（Mbps）
 			"disk_read_kbps":        readRate,                                // 磁盘读取速率（KB/s）
-			"disk_write_kbps":       writeRate,                               // 磁盘写入速率（KB/s）
+			"  ":                    writeRate,                               // 磁盘写入速率（KB/s）
 		})
 	}
 }
