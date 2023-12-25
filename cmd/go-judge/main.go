@@ -6,6 +6,7 @@ import (
 	"context"
 	crypto_rand "crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/net"
+	"io/ioutil"
 	"log"
 	math_rand "math/rand"
 	"net/http"
@@ -328,7 +330,7 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 	// Config handle
 	r.GET("/config", generateHandleConfig(conf, builderParam))
 
-	r.GET("/checkInfo", generateHandleCheckInfo(conf, builderParam))
+	r.GET("/checkInfo", generateHandleCheckInfo())
 
 	r.GET("/wsterm", handleWebSocket)
 
@@ -643,7 +645,7 @@ func calculateDiskIO() (float64, float64, error) {
 	return avgReadRate, avgWriteRate, nil
 }
 
-func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) func(*gin.Context) {
+func generateHandleCheckInfo() func(*gin.Context) {
 	return func(c *gin.Context) {
 		var wg sync.WaitGroup
 		var cpuUsage []float64
@@ -652,6 +654,10 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 		var mbpsSent, mbpsRecv float64
 		var readRate, writeRate float64
 		var err error
+		var containerID string
+
+		// 创建一个 WaitGroup 用于等待所有协程完成
+		var dockerWg sync.WaitGroup
 
 		// 并行获取 CPU 使用率
 		wg.Add(1)
@@ -703,8 +709,41 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 			}
 		}()
 
+		// 在一个协程中获取 Docker 容器信息
+		dockerWg.Add(1)
+		go func() {
+			defer dockerWg.Done()
+			// 发送 HTTP GET 请求到 Docker API 获取容器信息
+			resp, err := http.Get("http://host.docker.internal:2375/containers/json")
+			if err != nil {
+				fmt.Println("Error:", err)
+				return
+			}
+			defer resp.Body.Close()
+
+			// 读取响应体
+			body, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				fmt.Println("Error reading response body:", err)
+				return
+			}
+
+			// 在这里处理 Docker 容器信息
+			var containers []map[string]interface{}
+			if err := json.Unmarshal(body, &containers); err != nil {
+				fmt.Println("Error decoding container info:", err)
+				return
+			}
+
+			// 提取第一个容器的 ID，如果有多个容器，可以根据需要选择合适的容器
+			if len(containers) > 0 {
+				containerID = containers[0]["Id"].(string)
+			}
+		}()
+
 		// 等待所有协程完成
 		wg.Wait()
+		dockerWg.Wait()
 
 		// 验证获取到的数据
 		if cpuUsage == nil || memoryInfo == nil {
@@ -715,42 +754,43 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 		physicalCnt, _ := cpu.Counts(false)
 		logicalCnt, _ := cpu.Counts(true)
 
-		// 返回所有统计信息
+		// 返回所有统计信息，包括 Docker 容器 ID
 		c.JSON(http.StatusOK, gin.H{
-			"cpu_core_usage":        cpu_core_usage,                          //CPU 每个核得使用率
-			"cpu_total_usage":       cpuUsage[0],                             // CPU 总使用率
-			"cpu_physical_cores":    float64(physicalCnt),                    // 物理核心数
-			"cpu_logical_cores":     float64(logicalCnt),                     // 逻辑核心数
-			"memory_usage_percent":  memoryInfo.UsedPercent,                  // 内存使用百分比
-			"memory_used_mb":        float64(memoryInfo.Used) / 1024 / 1024,  // 已使用内存（MB）
-			"memory_total_mb":       float64(memoryInfo.Total) / 1024 / 1024, // 总内存（MB）
-			"network_upload_mbps":   mbpsSent,                                // 网络上传速率（Mbps）
-			"network_download_mbps": mbpsRecv,                                // 网络下载速率（Mbps）
-			"disk_read_kbps":        readRate,                                // 磁盘读取速率（KB/s）
-			"diskWriteKbps":         writeRate,                               // 磁盘写入速率（KB/s）
+			"cpu_core_usage":        cpu_core_usage,
+			"cpu_total_usage":       cpuUsage[0],
+			"cpu_physical_cores":    float64(physicalCnt),
+			"cpu_logical_cores":     float64(logicalCnt),
+			"memory_usage_percent":  memoryInfo.UsedPercent,
+			"memory_used_mb":        float64(memoryInfo.Used) / 1024 / 1024,
+			"memory_total_mb":       float64(memoryInfo.Total) / 1024 / 1024,
+			"network_upload_mbps":   mbpsSent,
+			"network_download_mbps": mbpsRecv,
+			"disk_read_kbps":        readRate,
+			"diskWriteKbps":         writeRate,
+			"Containers":            containerID, // 填充 Docker 容器 ID
 		})
 	}
 }
 
-var wsupgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // 根据需要调整跨域设置
-	},
-}
+var (
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true // 根据需要调整跨域设置
+		},
+	}
 
-// ...
-// 假设你维护了一个每个 WebSocket 连接的当前工作目录
-var currentDir = make(map[*websocket.Conn]string)
+	currentDir = make(map[*websocket.Conn]string)
+)
 
 func handleWebSocket(c *gin.Context) {
-	ws, err := wsupgrader.Upgrade(c.Writer, c.Request, nil)
+	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %s", err)
 		return
 	}
 	defer ws.Close()
 
-	// 初始化工作目录为用户的主目录或任何起始点
+	// 初始化工作目录为用户的主目录或其他起始目录
 	currentDir[ws] = "/root" // 或者其他起始目录
 
 	for {
@@ -764,21 +804,13 @@ func handleWebSocket(c *gin.Context) {
 		// 合并命令 - 先切换到当前目录，然后执行命令
 		fullCmd := fmt.Sprintf("cd %s && %s", currentDir[ws], string(message))
 
-		var cmd *exec.Cmd
-
-		// 根据操作系统选择执行的命令
-		switch runtime.GOOS {
-		case "windows":
-			cmd = exec.Command("cmd", "/C", fullCmd)
-		default:
-			cmd = exec.Command("bash", "-c", fullCmd)
-		}
-
 		// 执行命令并获取输出
+		cmd := exec.Command("bash", "-c", fullCmd)
+		cmd.Dir = currentDir[ws]
+
 		cmdOutput, err := cmd.CombinedOutput()
 		if err != nil {
 			ws.WriteMessage(websocket.TextMessage, []byte("Error executing command: "+err.Error()))
-			continue
 		}
 
 		// 更新当前工作目录
@@ -786,7 +818,7 @@ func handleWebSocket(c *gin.Context) {
 			currentDir[ws] = newPath
 		}
 
-		// 将输出发送回 WebSocket 客户端
+		// 将命令输出发送回 WebSocket 客户端
 		if err = ws.WriteMessage(websocket.TextMessage, cmdOutput); err != nil {
 			log.Println("Write error:", err)
 			break
