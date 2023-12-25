@@ -738,6 +738,10 @@ var wsupgrader = websocket.Upgrader{
 	},
 }
 
+// ...
+// 假设你维护了一个每个 WebSocket 连接的当前工作目录
+var currentDir = make(map[*websocket.Conn]string)
+
 func handleWebSocket(c *gin.Context) {
 	ws, err := wsupgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -746,33 +750,40 @@ func handleWebSocket(c *gin.Context) {
 	}
 	defer ws.Close()
 
+	// 初始化工作目录为用户的主目录或任何起始点
+	currentDir[ws] = "/root" // 或者其他起始目录
+
 	for {
 		_, message, err := ws.ReadMessage()
 		if err != nil {
 			log.Println("Read error:", err)
+			delete(currentDir, ws) // 清理
 			break
 		}
+
+		// 合并命令 - 先切换到当前目录，然后执行命令
+		fullCmd := fmt.Sprintf("cd %s && %s", currentDir[ws], string(message))
 
 		var cmd *exec.Cmd
 
 		// 根据操作系统选择执行的命令
 		switch runtime.GOOS {
 		case "windows":
-			// 在 Windows 上执行命令
-			cmd = exec.Command("cmd", "/C", string(message))
+			cmd = exec.Command("cmd", "/C", fullCmd)
 		default:
-			// 默认在 Unix-like 系统上执行命令
-			cmd = exec.Command("bash", "-c", string(message))
+			cmd = exec.Command("bash", "-c", fullCmd)
 		}
 
 		// 执行命令并获取输出
 		cmdOutput, err := cmd.CombinedOutput()
 		if err != nil {
-			err := ws.WriteMessage(websocket.TextMessage, []byte("Error executing command: "+err.Error()))
-			if err != nil {
-				return
-			}
+			ws.WriteMessage(websocket.TextMessage, []byte("Error executing command: "+err.Error()))
 			continue
+		}
+
+		// 更新当前工作目录
+		if newPath, err := os.Getwd(); err == nil {
+			currentDir[ws] = newPath
 		}
 
 		// 将输出发送回 WebSocket 客户端
