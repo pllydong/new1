@@ -649,7 +649,9 @@ func getContainerID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(output), nil
+	// 去掉末尾的换行符
+	containerID := strings.TrimRight(string(output), "\n")
+	return containerID, nil
 }
 
 func generateHandleCheckInfo() func(*gin.Context) {
