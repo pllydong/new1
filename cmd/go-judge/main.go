@@ -6,7 +6,6 @@ import (
 	"context"
 	crypto_rand "crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,7 +14,6 @@ import (
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/net"
-	"io/ioutil"
 	"log"
 	math_rand "math/rand"
 	"net/http"
@@ -644,6 +642,15 @@ func calculateDiskIO() (float64, float64, error) {
 
 	return avgReadRate, avgWriteRate, nil
 }
+func getContainerID() (string, error) {
+	// 使用 exec 包执行命令获取容器 ID
+	cmd := exec.Command("sh", "-c", "head -1 /proc/self/cgroup | cut -d/ -f3 | cut -c1-12")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
 
 func generateHandleCheckInfo() func(*gin.Context) {
 	return func(c *gin.Context) {
@@ -709,35 +716,13 @@ func generateHandleCheckInfo() func(*gin.Context) {
 			}
 		}()
 
-		// 在一个协程中获取 Docker 容器信息
+		// 在一个协程中获取 Docker 容器 ID
 		dockerWg.Add(1)
 		go func() {
 			defer dockerWg.Done()
-			// 发送 HTTP GET 请求到 Docker API 获取容器信息
-			resp, err := http.Get("http://host.docker.internal:2375/containers/json")
+			containerID, err = getContainerID()
 			if err != nil {
-				fmt.Println("Error:", err)
-				return
-			}
-			defer resp.Body.Close()
-
-			// 读取响应体
-			body, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				fmt.Println("Error reading response body:", err)
-				return
-			}
-
-			// 在这里处理 Docker 容器信息
-			var containers []map[string]interface{}
-			if err := json.Unmarshal(body, &containers); err != nil {
-				fmt.Println("Error decoding container info:", err)
-				return
-			}
-
-			// 提取第一个容器的 ID，如果有多个容器，可以根据需要选择合适的容器
-			if len(containers) > 0 {
-				containerID = containers[0]["Id"].(string)
+				containerID = ""
 			}
 		}()
 
@@ -767,7 +752,7 @@ func generateHandleCheckInfo() func(*gin.Context) {
 			"network_download_mbps": mbpsRecv,
 			"disk_read_kbps":        readRate,
 			"diskWriteKbps":         writeRate,
-			"Containers":            containerID, // 填充 Docker 容器 ID
+			"Containers":            containerID, // 包括 Docker 容器 ID
 		})
 	}
 }
