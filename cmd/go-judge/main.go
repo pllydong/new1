@@ -9,7 +9,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
@@ -330,7 +329,7 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 
 	r.GET("/checkInfo", generateHandleCheckInfo())
 
-	r.GET("/wsterm", handleWebSocket)
+	r.POST("/install", generateHandleInstall())
 
 	// Add auth token
 	if conf.AuthToken != "" {
@@ -759,56 +758,33 @@ func generateHandleCheckInfo() func(*gin.Context) {
 	}
 }
 
-var (
-	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true // 根据需要调整跨域设置
-		},
-	}
+// generateHandleInstall 返回一个处理安装请求的 gin.HandlerFunc
+func generateHandleInstall() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var json struct {
+			Command string `json:"command"` // 请求参数
+		}
 
-	currentDir = make(map[*websocket.Conn]string)
-)
+		// 绑定 JSON 请求体到结构体
+		if err := c.BindJSON(&json); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 
-func handleWebSocket(c *gin.Context) {
-	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Printf("WebSocket upgrade failed: %s", err)
-		return
-	}
-	defer ws.Close()
+		// 执行 apt-get install 命令
+		cmd := exec.Command("apt-get", "install", "-y", json.Command)
+		output, err := cmd.CombinedOutput()
 
-	// 初始化工作目录为用户的主目录或其他起始目录
-	currentDir[ws] = "/root" // 或者其他起始目录
-
-	for {
-		_, message, err := ws.ReadMessage()
+		// 处理执行结果
 		if err != nil {
-			log.Println("Read error:", err)
-			delete(currentDir, ws) // 清理
-			break
-		}
-
-		// 合并命令 - 先切换到当前目录，然后执行命令
-		fullCmd := fmt.Sprintf("cd %s && %s", currentDir[ws], string(message))
-
-		// 执行命令并获取输出
-		cmd := exec.Command("bash", "-c", fullCmd)
-		cmd.Dir = currentDir[ws]
-
-		cmdOutput, err := cmd.CombinedOutput()
-		if err != nil {
-			ws.WriteMessage(websocket.TextMessage, []byte("Error executing command: "+err.Error()))
-		}
-
-		// 更新当前工作目录
-		if newPath, err := os.Getwd(); err == nil {
-			currentDir[ws] = newPath
-		}
-
-		// 将命令输出发送回 WebSocket 客户端
-		if err = ws.WriteMessage(websocket.TextMessage, cmdOutput); err != nil {
-			log.Println("Write error:", err)
-			break
+			// 检查是否因为包不存在导致的错误
+			if strings.Contains(string(output), "Unable to locate package") {
+				c.JSON(http.StatusOK, gin.H{"code": 0, "msg": string(output)})
+			} else {
+				c.JSON(http.StatusOK, gin.H{"code": 1, "msg": string(output)})
+			}
+		} else {
+			c.JSON(http.StatusOK, gin.H{"code": 2, "msg": string(output)})
 		}
 	}
 }
