@@ -758,7 +758,6 @@ func generateHandleCheckInfo() func(*gin.Context) {
 	}
 }
 
-// generateHandleInstall 返回一个处理安装请求的 gin.HandlerFunc
 func generateHandleInstall() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var json struct {
@@ -771,9 +770,16 @@ func generateHandleInstall() gin.HandlerFunc {
 			return
 		}
 
-		// 执行 apt-get install 命令
-		cmd := exec.Command("apt-get", "install", "-y", json.Command)
-		output, err := cmd.CombinedOutput()
+		// 首先执行 apt-get update 来更新软件包索引
+		updateCmd := exec.Command("apt-get", "update")
+		if _, err := updateCmd.CombinedOutput(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update package list"})
+			return
+		}
+
+		// 然后执行 apt-get install 命令
+		installCmd := exec.Command("apt-get", "install", "-y", json.Command)
+		output, err := installCmd.CombinedOutput()
 
 		// 处理执行结果
 		if err != nil {
