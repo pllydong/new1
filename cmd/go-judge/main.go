@@ -778,7 +778,7 @@ func generateHandleInstall() gin.HandlerFunc {
 		}
 
 		// 然后执行 apt-get install 命令
-		installCmd := exec.Command("apt-get", "install", "-y", json.Command)
+		installCmd := exec.Command("apt-get", "install", "-y", "--no-install-recommends", json.Command)
 		output, err := installCmd.CombinedOutput()
 
 		// 处理执行结果
