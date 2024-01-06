@@ -331,6 +331,8 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 
 	r.POST("/install", generateHandleInstall())
 
+	r.GET("/getInstallList", generateHandleListInstalledPackages())
+
 	// Add auth token
 	if conf.AuthToken != "" {
 		r.Use(tokenAuth(conf.AuthToken))
@@ -791,6 +793,21 @@ func generateHandleInstall() gin.HandlerFunc {
 			}
 		} else {
 			c.JSON(http.StatusOK, gin.H{"code": 2, "msg": string(output)})
+		}
+	}
+}
+func generateHandleListInstalledPackages() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 执行 dpkg-query 命令以获取已安装的软件包列表
+		listCmd := exec.Command("dpkg-query", "-f", "${binary:Package}\n", "-W")
+		output, err := listCmd.CombinedOutput()
+
+		// 处理执行结果
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list installed packages"})
+		} else {
+			// 输出结果作为字符串
+			c.JSON(http.StatusOK, gin.H{"installed_packages": string(output)})
 		}
 	}
 }
