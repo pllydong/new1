@@ -13,6 +13,7 @@ import (
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 	"github.com/shirou/gopsutil/net"
+	"io"
 	"log"
 	math_rand "math/rand"
 	"net/http"
@@ -774,28 +775,57 @@ func generateHandleInstall() gin.HandlerFunc {
 
 		// 首先执行 apt-get update 来更新软件包索引
 		updateCmd := exec.Command("apt-get", "update")
-		if _, err := updateCmd.CombinedOutput(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update package list"})
+		updateOutput, err := updateCmd.CombinedOutput()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update package list", "details": string(updateOutput)})
 			return
 		}
 
 		// 然后执行 apt-get install 命令
 		installCmd := exec.Command("apt-get", "install", "-y", "--no-install-recommends", json.Command)
-		output, err := installCmd.CombinedOutput()
 
-		// 处理执行结果
+		// 创建一个 pipe，用于实时获取输出
+		installOut, err := installCmd.StdoutPipe()
 		if err != nil {
-			// 检查是否因为包不存在导致的错误
-			if strings.Contains(string(output), "Unable to locate package") {
-				c.JSON(http.StatusOK, gin.H{"code": 0, "msg": string(output)})
-			} else {
-				c.JSON(http.StatusOK, gin.H{"code": 1, "msg": string(output)})
-			}
-		} else {
-			c.JSON(http.StatusOK, gin.H{"code": 2, "msg": string(output)})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create stdout pipe"})
+			return
 		}
+		installErr, err := installCmd.StderrPipe()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create stderr pipe"})
+			return
+		}
+
+		// 开始执行命令
+		if err := installCmd.Start(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start install command"})
+			return
+		}
+
+		// 实时将输出发送到 HTTP 响应
+		c.Stream(func(w io.Writer) bool {
+			if _, err := io.Copy(w, installOut); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to copy stdout"})
+				return false
+			}
+			if _, err := io.Copy(w, installErr); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to copy stderr"})
+				return false
+			}
+			return false
+		})
+
+		// 等待命令执行完成
+		if err := installCmd.Wait(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Install command failed"})
+			return
+		}
+
+		// 完成后发送成功消息
+		c.JSON(http.StatusOK, gin.H{"message": "Installation completed successfully"})
 	}
 }
+
 func generateHandleListInstalledPackages() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 执行 dpkg-query 命令以获取已安装的软件包列表
