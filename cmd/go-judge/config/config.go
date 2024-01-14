@@ -77,9 +77,9 @@ func (c *Config) Load() error {
 		c.GRPCAddr = ":5051"
 		c.MonitorAddr = ":5052"
 	} else {
-		c.HTTPAddr = "localhost:5050"
-		c.GRPCAddr = "localhost:5051"
-		c.MonitorAddr = "localhost:5052"
+		c.HTTPAddr = "0.0.0.0:5050"
+		c.GRPCAddr = "0.0.0.0:5051"
+		c.MonitorAddr = "0.0.0.0:5052"
 	}
 	if c.Parallelism <= 0 {
 		c.Parallelism = runtime.NumCPU()

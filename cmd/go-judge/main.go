@@ -3,12 +3,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	crypto_rand "crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
@@ -330,7 +333,7 @@ func initHTTPMux(conf *config.Config, work worker.Worker, fs filestore.FileStore
 
 	r.GET("/checkInfo", generateHandleCheckInfo())
 
-	r.POST("/install", generateHandleInstall())
+	r.GET("/install", generateHandleInstall())
 
 	r.GET("/getInstallList", generateHandleListInstalledPackages())
 
@@ -761,91 +764,118 @@ func generateHandleCheckInfo() func(*gin.Context) {
 	}
 }
 
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+}
+
 func generateHandleInstall() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			// 错误处理
+			return
+		}
+		defer conn.Close()
+		log.Println("WebSocket connection established")
+
 		var jsonReq struct {
-			Command string `json:"command"` // 请求参数
+			Command string `json:"command"`
 		}
-
-		// 绑定 JSON 请求体到结构体
-		if err := c.BindJSON(&jsonReq); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
-			return
-		}
-
-		// 首先执行 apt-get update 来更新软件包索引
-		updateCmd := exec.Command("apt-get", "update")
-		updateOutput, err := updateCmd.CombinedOutput()
+		err = conn.ReadJSON(&jsonReq)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to update package list: " + string(updateOutput)})
+			// 错误处理
 			return
 		}
+		sendDefaultMessage(conn, "连接已建立", "info")
+		// 使用 WaitGroup 来等待所有协程完成
+		var wg sync.WaitGroup
 
-		// 然后执行 apt-get install 命令
-		installCmd := exec.Command("apt-get", "install", "-y", "--no-install-recommends", jsonReq.Command)
+		// 首先执行 apt-get update
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			updateCmd := exec.Command("apt-get", "update")
+			updateOut, _ := updateCmd.StdoutPipe()
+			updateErrOut, _ := updateCmd.StderrPipe()
 
-		// 创建一个 pipe，用于实时获取输出
-		installOut, err := installCmd.StdoutPipe()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to create stdout pipe"})
-			return
-		}
-		installErr, err := installCmd.StderrPipe()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to create stderr pipe"})
-			return
-		}
-
-		// 开始执行命令
-		if err := installCmd.Start(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to start install command"})
-			return
-		}
-
-		// 实时将输出发送到 HTTP 响应
-		c.Stream(func(w io.Writer) bool {
-			// 创建一个缓冲来读取输出
-			buf := make([]byte, 1024)
-			for {
-				n, err := installOut.Read(buf)
-				if err != nil && err != io.EOF {
-					c.JSON(http.StatusInternalServerError, gin.H{"message": "Error while reading stdout"})
-					return false
-				}
-				if n > 0 {
-					c.JSON(http.StatusOK, gin.H{"message": string(buf[:n])})
-				}
-				if err == io.EOF {
-					break
-				}
+			if err := updateCmd.Start(); err != nil {
+				// 错误处理
+				return
 			}
 
-			for {
-				n, err := installErr.Read(buf)
-				if err != nil && err != io.EOF {
-					c.JSON(http.StatusInternalServerError, gin.H{"message": "Error while reading stderr"})
-					return false
-				}
-				if n > 0 {
-					c.JSON(http.StatusOK, gin.H{"message": string(buf[:n])})
-				}
-				if err == io.EOF {
-					break
-				}
+			readCmdOutput(updateOut, conn, "info")     // 正常消息
+			readCmdOutput(updateErrOut, conn, "error") // 错误消息
+
+			if err := updateCmd.Wait(); err != nil {
+				// 错误处理
+				return
+			}
+		}()
+
+		// 执行 apt-get install
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			installCmd := exec.Command("apt-get", "install", "-y", "--no-install-recommends", jsonReq.Command)
+			installOut, _ := installCmd.StdoutPipe()
+			installErrOut, _ := installCmd.StderrPipe()
+
+			if err := installCmd.Start(); err != nil {
+				// 错误处理
+				return
 			}
 
-			return true
-		})
+			readCmdOutput(installOut, conn, "info")     // 正常消息
+			readCmdOutput(installErrOut, conn, "error") // 错误消息
 
-		// 等待命令执行完成
-		if err := installCmd.Wait(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"message": "Install command failed"})
-			return
-		}
+			if err := installCmd.Wait(); err != nil {
+				// 错误处理
+				return
+			}
+		}()
 
-		// 完成后发送成功消息
-		c.JSON(http.StatusOK, gin.H{"message": "Installation completed successfully"})
+		// 使用 WaitGroup 等待所有协程完成
+		wg.Wait()
+
+		// 发送完成消息
+		sendDefaultMessage(conn, "安装结束", "end")
+
 	}
+}
+
+type jsonResponse struct {
+	Message string `json:"message"`
+	Level   string `json:"state"`
+}
+
+func readCmdOutput(pipe io.Reader, conn *websocket.Conn, state string) {
+	scanner := bufio.NewScanner(pipe)
+	for scanner.Scan() {
+		response := jsonResponse{
+			Message: scanner.Text(),
+			Level:   state,
+		}
+		jsonMessage, err := json.Marshal(response)
+		if err != nil {
+			// 错误处理
+			return
+		}
+		conn.WriteMessage(websocket.TextMessage, jsonMessage)
+	}
+}
+
+func sendDefaultMessage(conn *websocket.Conn, message string, state string) {
+	response := jsonResponse{
+		Message: message,
+		Level:   state,
+	}
+	jsonMessage, err := json.Marshal(response)
+	if err != nil {
+		// 错误处理
+		return
+	}
+	conn.WriteMessage(websocket.TextMessage, jsonMessage)
 }
 
 func generateHandleListInstalledPackages() gin.HandlerFunc {
