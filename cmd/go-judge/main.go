@@ -862,6 +862,7 @@ func readCmdOutput(pipe io.Reader, conn *websocket.Conn, state string) {
 			return
 		}
 		conn.WriteMessage(websocket.TextMessage, jsonMessage)
+		log.Println(response)
 	}
 }
 
