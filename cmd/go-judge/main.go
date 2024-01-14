@@ -777,12 +777,11 @@ func generateHandleInstall() gin.HandlerFunc {
 			return
 		}
 		defer conn.Close()
-		log.Println("WebSocket connection established")
-
 		var jsonReq struct {
 			Command string `json:"command"`
 		}
 		err = conn.ReadJSON(&jsonReq)
+		log.Println(jsonReq)
 		if err != nil {
 			// 错误处理
 			return
@@ -862,7 +861,6 @@ func readCmdOutput(pipe io.Reader, conn *websocket.Conn, state string) {
 			return
 		}
 		conn.WriteMessage(websocket.TextMessage, jsonMessage)
-		log.Println(response)
 	}
 }
 
