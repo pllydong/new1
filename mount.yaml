@@ -80,6 +80,10 @@ mount:
     source: dotenv
     target: /.env
     #readonly: true
+  - type: bind
+    source: /etc/java-17-openjdk
+    target: /etc/java-17-openjdk
+    readonly: true
 # java & ghc wants /proc/self/exe
 proc: true
 # create /dev standard io
